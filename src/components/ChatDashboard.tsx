@@ -1,18 +1,17 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Send, Menu, X, Download, Home, Eye, Code, Image as ImageIcon, 
+  Send, Menu, X, Download, Home, Eye, Code, 
   Loader2, Sparkles, ChevronLeft, ChevronRight
 } from 'lucide-react';
 import JSZip from 'jszip';
 import html2canvas from 'html2canvas';
 import { Project, Message } from '@/types/project';
-import { getProvider, generateCodePrompt, pollinationsAI } from '@/lib/ai-providers';
+import { getProvider, generateCodePrompt, pollinationsAI, isImageRequest } from '@/lib/ai-providers';
 import { ChatMessage } from './ChatMessage';
 import { VersionHistory } from './VersionHistory';
 import { PreviewFrame } from './PreviewFrame';
 import { CodeEditor } from './CodeEditor';
-import { ProviderSelector } from './ProviderSelector';
 
 interface ChatDashboardProps {
   project: Project;
@@ -21,6 +20,8 @@ interface ChatDashboardProps {
   onAddVersion: (prompt: string, files: Record<string, string>, snapshot?: string) => void;
   onLoadVersion: (versionId: string) => void;
   onExit: () => void;
+  isNewProject?: boolean;
+  typingText?: string;
 }
 
 export const ChatDashboard = ({
@@ -30,14 +31,15 @@ export const ChatDashboard = ({
   onAddVersion,
   onLoadVersion,
   onExit,
+  isNewProject = false,
+  typingText = '',
 }: ChatDashboardProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
-  const [showVersions, setShowVersions] = useState(true);
+  const [showVersions, setShowVersions] = useState(!isNewProject);
   const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
-  const [selectedProvider, setSelectedProvider] = useState('pollinations');
   const [progress, setProgress] = useState(0);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -82,10 +84,11 @@ export const ChatDashboard = ({
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
 
+    const userInput = input.trim();
     const userMessage: Message = {
       id: `msg_${Date.now()}`,
       role: 'user',
-      content: input.trim(),
+      content: userInput,
       timestamp: Date.now(),
     };
 
@@ -94,9 +97,40 @@ export const ChatDashboard = ({
     setIsLoading(true);
     setProgress(20);
 
+    // Check if this is an image request
+    if (isImageRequest(userInput)) {
+      try {
+        const imageUrl = await pollinationsAI.generateImage!(userInput);
+        
+        const assistantMessage: Message = {
+          id: `msg_${Date.now()}`,
+          role: 'assistant',
+          content: 'Here\'s your generated image!',
+          timestamp: Date.now(),
+          imageUrl,
+        };
+
+        setMessages(prev => [...prev, assistantMessage]);
+      } catch (error) {
+        console.error('Image generation error:', error);
+        const errorMessage: Message = {
+          id: `msg_${Date.now()}`,
+          role: 'assistant',
+          content: 'Failed to generate image. Please try again.',
+          timestamp: Date.now(),
+        };
+        setMessages(prev => [...prev, errorMessage]);
+      } finally {
+        setIsLoading(false);
+        setProgress(0);
+      }
+      return;
+    }
+
+    // Text/code generation
     try {
-      const provider = getProvider(selectedProvider);
-      const prompt = generateCodePrompt(input.trim(), JSON.stringify(currentFiles));
+      const provider = getProvider();
+      const prompt = generateCodePrompt(userInput, JSON.stringify(currentFiles));
       
       setProgress(50);
       const response = await provider.generate(prompt);
@@ -123,7 +157,7 @@ export const ChatDashboard = ({
       // Capture snapshot after render
       setTimeout(async () => {
         const snapshot = await captureSnapshot();
-        onAddVersion(input.trim(), files, snapshot);
+        onAddVersion(userInput, files, snapshot);
         setProgress(0);
       }, 1000);
 
@@ -132,51 +166,11 @@ export const ChatDashboard = ({
       const errorMessage: Message = {
         id: `msg_${Date.now()}`,
         role: 'assistant',
-        content: 'Something went wrong. Please try again or switch to a different AI provider.',
+        content: 'Something went wrong. The API might be rate-limited. Please wait a moment and try again.',
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, errorMessage]);
       setProgress(0);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleImageGenerate = async () => {
-    if (!input.trim() || isLoading) return;
-
-    const userMessage: Message = {
-      id: `msg_${Date.now()}`,
-      role: 'user',
-      content: `🎨 Generate image: ${input.trim()}`,
-      timestamp: Date.now(),
-    };
-
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
-    setIsLoading(true);
-
-    try {
-      const imageUrl = await pollinationsAI.generateImage!(input.trim());
-      
-      const assistantMessage: Message = {
-        id: `msg_${Date.now()}`,
-        role: 'assistant',
-        content: 'Here\'s your generated image!',
-        timestamp: Date.now(),
-        imageUrl,
-      };
-
-      setMessages(prev => [...prev, assistantMessage]);
-    } catch (error) {
-      console.error('Image generation error:', error);
-      const errorMessage: Message = {
-        id: `msg_${Date.now()}`,
-        role: 'assistant',
-        content: 'Failed to generate image. Please try again.',
-        timestamp: Date.now(),
-      };
-      setMessages(prev => [...prev, errorMessage]);
     } finally {
       setIsLoading(false);
     }
@@ -197,7 +191,7 @@ export const ChatDashboard = ({
   };
 
   return (
-    <div className="h-screen flex flex-col bg-background overflow-hidden">
+    <div className="h-full flex flex-col bg-background overflow-hidden">
       {/* Progress Bar */}
       <AnimatePresence>
         {progress > 0 && (
@@ -268,103 +262,104 @@ export const ChatDashboard = ({
 
       <div className="flex-1 flex overflow-hidden">
         {/* Version History Sidebar */}
-        <motion.aside
-          initial={false}
-          animate={{ width: showVersions ? 280 : 0, opacity: showVersions ? 1 : 0 }}
-          className="hidden lg:flex flex-col border-r border-border bg-card/30 overflow-hidden"
-        >
-          <div className="p-4 flex-1 overflow-hidden">
-            <div className="flex items-center gap-2 mb-4">
-              <button
-                onClick={() => setShowSidebar(true)}
-                className="p-2 hover:bg-secondary rounded-lg text-muted-foreground lg:hidden"
-              >
-                <Menu className="w-5 h-5" />
-              </button>
-              <VersionHistory
-                versions={project.versions}
-                currentVersionId={project.versions[0]?.id}
-                onLoadVersion={onLoadVersion}
-              />
-            </div>
-          </div>
-          
-          {/* AI Status */}
-          <div className="p-4 border-t border-border">
-            <div className="text-[10px] uppercase text-primary font-bold mb-2 flex items-center gap-1.5">
-              <Sparkles className="w-3 h-3" />
-              AI Status
-            </div>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              {isLoading ? 'Generating...' : 'Ready for your next prompt.'}
-            </p>
-          </div>
-        </motion.aside>
+        {!isNewProject && (
+          <>
+            <motion.aside
+              initial={false}
+              animate={{ width: showVersions ? 280 : 0, opacity: showVersions ? 1 : 0 }}
+              className="hidden lg:flex flex-col border-r border-border bg-card/30 overflow-hidden"
+            >
+              <div className="p-4 flex-1 overflow-hidden">
+                <div className="flex items-center gap-2 mb-4">
+                  <button
+                    onClick={() => setShowSidebar(true)}
+                    className="p-2 hover:bg-secondary rounded-lg text-muted-foreground lg:hidden"
+                  >
+                    <Menu className="w-5 h-5" />
+                  </button>
+                  <VersionHistory
+                    versions={project.versions}
+                    currentVersionId={project.versions[0]?.id}
+                    onLoadVersion={onLoadVersion}
+                  />
+                </div>
+              </div>
+              
+              {/* AI Status */}
+              <div className="p-4 border-t border-border">
+                <div className="text-[10px] uppercase text-primary font-bold mb-2 flex items-center gap-1.5">
+                  <Sparkles className="w-3 h-3" />
+                  AI Status
+                </div>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {isLoading ? 'Generating...' : 'Ready for your next prompt.'}
+                </p>
+              </div>
+            </motion.aside>
 
-        {/* Toggle Versions Button */}
-        <button
-          onClick={() => setShowVersions(!showVersions)}
-          className="hidden lg:flex items-center justify-center w-6 hover:bg-secondary border-r border-border transition-colors"
-        >
-          {showVersions ? (
-            <ChevronLeft className="w-4 h-4 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="w-4 h-4 text-muted-foreground" />
-          )}
-        </button>
+            {/* Toggle Versions Button */}
+            <button
+              onClick={() => setShowVersions(!showVersions)}
+              className="hidden lg:flex items-center justify-center w-6 hover:bg-secondary border-r border-border transition-colors"
+            >
+              {showVersions ? (
+                <ChevronLeft className="w-4 h-4 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="w-4 h-4 text-muted-foreground" />
+              )}
+            </button>
+          </>
+        )}
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Header */}
-          <header className="flex items-center justify-between p-4 border-b border-border bg-card/30">
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setShowSidebar(true)}
-                className="p-2 hover:bg-secondary rounded-lg text-muted-foreground lg:hidden"
-              >
-                <Menu className="w-5 h-5" />
-              </button>
-              <h1 className="font-semibold text-sm truncate max-w-[200px]">{project.title}</h1>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <ProviderSelector
-                selectedProvider={selectedProvider}
-                onSelect={setSelectedProvider}
-              />
-              
-              <div className="hidden sm:flex items-center gap-1 p-1 rounded-lg bg-secondary">
+          {/* Header - only show for existing projects */}
+          {!isNewProject && (
+            <header className="flex items-center justify-between p-4 border-b border-border bg-card/30">
+              <div className="flex items-center gap-3">
                 <button
-                  onClick={() => setViewMode('preview')}
-                  className={`p-2 rounded-md transition-colors ${viewMode === 'preview' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                  onClick={() => setShowSidebar(true)}
+                  className="p-2 hover:bg-secondary rounded-lg text-muted-foreground lg:hidden"
                 >
-                  <Eye className="w-4 h-4" />
+                  <Menu className="w-5 h-5" />
                 </button>
-                <button
-                  onClick={() => setViewMode('code')}
-                  className={`p-2 rounded-md transition-colors ${viewMode === 'code' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-                >
-                  <Code className="w-4 h-4" />
-                </button>
+                <h1 className="font-semibold text-sm truncate max-w-[200px]">{project.title}</h1>
               </div>
 
-              <button
-                onClick={handleDownload}
-                className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-success transition-colors"
-                title="Download ZIP"
-              >
-                <Download className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                <div className="hidden sm:flex items-center gap-1 p-1 rounded-lg bg-secondary">
+                  <button
+                    onClick={() => setViewMode('preview')}
+                    className={`p-2 rounded-md transition-colors ${viewMode === 'preview' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                  >
+                    <Eye className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => setViewMode('code')}
+                    className={`p-2 rounded-md transition-colors ${viewMode === 'code' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+                  >
+                    <Code className="w-4 h-4" />
+                  </button>
+                </div>
 
-              <button
-                onClick={onExit}
-                className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                title="Exit"
-              >
-                <Home className="w-4 h-4" />
-              </button>
-            </div>
-          </header>
+                <button
+                  onClick={handleDownload}
+                  className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-success transition-colors"
+                  title="Download ZIP"
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+
+                <button
+                  onClick={onExit}
+                  className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                  title="Exit"
+                >
+                  <Home className="w-4 h-4" />
+                </button>
+              </div>
+            </header>
+          )}
 
           {/* Content Area */}
           <div className="flex-1 flex overflow-hidden">
@@ -375,9 +370,13 @@ export const ChatDashboard = ({
                 {messages.length === 0 && (
                   <div className="flex flex-col items-center justify-center h-full text-center p-8">
                     <Sparkles className="w-12 h-12 text-primary/30 mb-4" />
-                    <h3 className="font-semibold text-foreground mb-2">Start Creating</h3>
+                    <h3 className="font-semibold text-foreground mb-2">
+                      {isNewProject ? 'What would you like to build?' : 'Start Creating'}
+                    </h3>
                     <p className="text-sm text-muted-foreground">
-                      Ask for changes or generate images. The AI will update your project in real-time.
+                      {isNewProject 
+                        ? 'Describe your project and I\'ll generate it. Say "image" or "photo" for AI images.'
+                        : 'Ask for changes or generate images. The AI will update your project in real-time.'}
                     </p>
                   </div>
                 )}
@@ -411,16 +410,8 @@ export const ChatDashboard = ({
                     onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
                     disabled={isLoading}
                     className="flex-1 bg-transparent px-3 py-2 outline-none text-sm placeholder:text-muted-foreground"
-                    placeholder="Ask for a change..."
+                    placeholder={isNewProject ? "Describe what to build..." : "Ask for a change..."}
                   />
-                  <button
-                    onClick={handleImageGenerate}
-                    disabled={isLoading || !input.trim()}
-                    className="p-2 rounded-xl hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-                    title="Generate Image"
-                  >
-                    <ImageIcon className="w-4 h-4" />
-                  </button>
                   <button
                     onClick={handleSend}
                     disabled={isLoading || !input.trim()}
@@ -433,6 +424,9 @@ export const ChatDashboard = ({
                     )}
                   </button>
                 </div>
+                <p className="text-xs text-muted-foreground mt-2 text-center">
+                  Tip: Say "image", "photo", or "draw" to generate images
+                </p>
               </div>
             </div>
 
